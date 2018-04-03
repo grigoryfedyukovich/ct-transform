@@ -26,6 +26,47 @@ namespace {
 
     std::vector<BasicBlock*> loop;
 
+    void mkConditionalStore (GlobalVariable *varRet, StoreInst * stIn) {
+
+      // this could be done in two stages: via 1) creating icmp, br, two new blocks and 2) running ct-ite
+      // but the current version is an optimized one: using ct_eq + ct_select
+
+      LLVMContext& C = stIn->getContext();
+      IRBuilder<> builder(C);
+      Module *M = stIn->getParent()->getParent()->getParent();
+
+      Instruction* ldIn = builder.CreateLoad(varRet);
+      ldIn->insertBefore(stIn);
+      Function * ct_eq = cast<Function>(M->getOrInsertFunction("constant_time_eq",
+                    Type::getInt32Ty(C), Type::getInt32Ty(C), Type::getInt32Ty(C), NULL));
+      ConstantInt *cc = ConstantInt::get(C, APInt(32, 0));
+      CallInst * grdIn = builder.CreateCall(ct_eq, {ldIn, cc});
+      grdIn->insertAfter(ldIn);
+
+      Instruction* ldIn2 = builder.CreateLoad(stIn->getOperand (1));
+      ldIn2->insertAfter(grdIn);
+      Function * ct_ite = cast<Function>(M->getOrInsertFunction("constant_time_select", Type::getInt32Ty(C),
+                    Type::getInt32Ty(C), Type::getInt32Ty(C), Type::getInt32Ty(C), NULL));
+      CallInst * clIn = builder.CreateCall(ct_ite, {grdIn, stIn->getOperand (0), ldIn2} );
+      clIn->insertAfter(ldIn2);
+      Instruction *stIn2 = builder.CreateStore(clIn, stIn->getOperand (1));
+      stIn2->insertAfter(clIn);
+
+      stIn->eraseFromParent();
+    }
+
+    void rewriteStores (BasicBlock * b, GlobalVariable *varRet){
+      for (auto it = b->rbegin (); it != b->rend (); ++it) {
+        Instruction* I = dyn_cast<Instruction> (&*it);
+        StoreInst* stIn;
+        if ((stIn = dyn_cast<StoreInst>(I)) &&
+            (stIn->getOperand (1)->getType()->getTypeID() == Type::PointerTyID))
+        {
+          mkConditionalStore(varRet, stIn);
+        }
+      }
+    }
+
     bool isReachable (BasicBlock* next, std::vector<BasicBlock*> prev) {
       prev.push_back(next);
       BranchInst* lastBri;
@@ -55,25 +96,50 @@ namespace {
       return isReachable(bri->getParent(), std::vector<BasicBlock*> ());
     }
 
+    // assumes at least one argument of Icmp is var, to add more sophisticated analysis
+    ICmpInst* replaceVarInIcmp (ICmpInst* icmp, Instruction* loadTmp){
+      LoadInst *l = nullptr;
+      if ((l = dyn_cast<LoadInst>(icmp->getOperand(0)))) {
+        return new ICmpInst(icmp->getPredicate(), loadTmp, icmp->getOperand(1));
+      }
+      else if ((l = dyn_cast<LoadInst>(icmp->getOperand(1)))) {
+        return new ICmpInst(icmp->getPredicate(), icmp->getOperand(0), loadTmp);
+      }
+      else assert(0); // TODO: support
+    }
+
+    bool isChainToExit(BasicBlock* start, BasicBlock* end) {
+      if (start == end) return true;
+      BranchInst* lastBri;
+      if ((lastBri = dyn_cast<BranchInst> (&*(start->rbegin ())))){
+        if (lastBri->getNumSuccessors() > 1) return false;
+          else return isChainToExit (lastBri->getSuccessor(0), end);
+      } else return false;
+    }
+
     void balanceLoop (BranchInst* bri, std::vector<BasicBlock*>& loop){
       // currently, bri is used only to insert the initialization of an artificial counter
 
+      BranchInst* headBr;
+      if (!(headBr = dyn_cast<BranchInst> (&*(loop[0]->rbegin ())))) return;
+      if (headBr->getNumSuccessors() == 1) return;
+      BasicBlock* exitBB = (headBr->getSuccessor(0) == loop[1]) ?
+                            headBr->getSuccessor(1) : headBr->getSuccessor(0);
+
       BranchInst* lastBri;
-      unsigned int i = 0;
-      bool found = false;
-      for (; i < loop.size() - 1 && !found; i++)
+      std::vector<BranchInst* > bris;
+      for (unsigned int i = 1; i < loop.size() - 1; i++)
       {
         if ((lastBri = dyn_cast<BranchInst> (&*(loop[i]->rbegin ())))){
-          if (i == 0 && lastBri->getNumSuccessors() == 1) return;
-          if (i > 0 && lastBri->getNumSuccessors() == 2) {found = true; break;}
+          if (lastBri->getNumSuccessors() == 2 &&
+             (isChainToExit(lastBri->getSuccessor(0), exitBB) || isChainToExit(lastBri->getSuccessor(1), exitBB))) {
+            bris.push_back(lastBri);
+          }
         }
         else return;
       }
 
-      if (!found) return;
-      errs() << "Balancing [" << i << "th node]\n";
-
-      BranchInst* headBr = dyn_cast<BranchInst> (&*(loop[0]->rbegin ()));
+      if (bris.size() == 0) return;
 
       ConstantInt *cc = ConstantInt::get(headBr->getContext(), APInt(32, 0));
 
@@ -94,26 +160,25 @@ namespace {
       I2->insertBefore(bri);
       I2ret->insertBefore(I2);
 
-      //
-      // here, we instrument both branches with artif. counter:
+      // then, before each store, we check if the original loop has already terminated
+      for (unsigned int i = 1; i < loop.size()-1; i++) rewriteStores(loop[i], varRet);
 
+      // then, we instrument the body with artif. counter:
       for (int j = 0; j < 2; j++){
         
         BasicBlock* b1 = headBr->getSuccessor(j);
         if (b1 == loop[1]) {
           // loop iteration
-          
+
           Instruction* loop1 = builder.CreateLoad(var);
-          
           BinaryOperator *loop2 = BinaryOperator::
           CreateAdd(loop1, ConstantInt::get(headBr->getContext(), APInt(32, 1)));
-          
           Instruction* loop3 = builder.CreateStore(loop2, var);
-          
+
           loop1->insertBefore(&*(b1->begin ()));  // adding an increment
           loop2->insertAfter(loop1);              // here, we assume the original counter increments by one
           loop3->insertAfter(loop2);              //
-          
+
         }
       }
 
@@ -121,8 +186,7 @@ namespace {
       ICmpInst *old_icmp = dyn_cast<ICmpInst>(headBr->getCondition ());
       Instruction* loadTmp = builder.CreateLoad(var);
       loadTmp->insertBefore(headBr);
-      ICmpInst *inIcmp = new ICmpInst(old_icmp->getPredicate(), loadTmp, old_icmp->getOperand(1));
-      // tested for ICmpInst::ICMP_ULE
+      ICmpInst *inIcmp = replaceVarInIcmp(old_icmp, loadTmp); // tested for ICmpInst::ICMP_ULE / ICMP_ULT
       inIcmp->insertAfter(loadTmp);
 
       BranchInst* newBr = BranchInst::Create(headBr->getSuccessor(0), headBr->getSuccessor(1), inIcmp);
@@ -131,22 +195,25 @@ namespace {
       old_icmp->eraseFromParent();
       loop[0]->begin()->eraseFromParent(); // erase "load s"
 
-      
       // then, proceed further to the loop
       // previously, we identified the divergence at lastBri = dyn_cast<BranchInst> (&*(loop[i]->rbegin ()))
       // (thus need to keep the edge lastBri->loop[i+1] only)
 
-      {
-        // in the future, it will be in the loop for each "return"
-        BasicBlock* toRemove;
-        for (unsigned int j = 0; j < lastBri->getNumSuccessors (); j++){
-          if (loop[i+1] != lastBri->getSuccessor(j)) toRemove = lastBri->getSuccessor(j);
+      for (auto lbri : bris) {
+        BranchInst* briToRemove;
+        if (isChainToExit(lbri->getSuccessor(0), exitBB)) {
+          briToRemove = dyn_cast<BranchInst> (&*(lbri->getSuccessor(0)->rbegin ()));
+        } else {
+          briToRemove = dyn_cast<BranchInst> (&*(lbri->getSuccessor(1)->rbegin ()));
         }
-        
-        BranchInst* oldBr = dyn_cast<BranchInst> (&*(toRemove->rbegin ()));
-        Instruction* newBr = loop[i+1]->rbegin ()->clone();
-        newBr->insertAfter(oldBr);
-        oldBr->eraseFromParent();
+
+        ConstantInt *c1 = ConstantInt::get(headBr->getContext(), APInt(32, 1));
+        Instruction *retSt = builder.CreateStore(c1, (Value*)varRet);         // here; we assume the original counter starts with 0
+        retSt->insertBefore(briToRemove);
+
+        Instruction* newBr = BranchInst::Create(loop[0]);
+        newBr->insertAfter(briToRemove);
+        briToRemove->eraseFromParent();
       }
     }
 
@@ -155,11 +222,10 @@ namespace {
       bool balanced = false;
 
       while (toRecheck){
-        
+
         std::set<Instruction*> toRem;
-        
         toRecheck = false;
-        
+
         for (BasicBlock &b : F){
           for (User &u : b) {
             BranchInst* bri;
