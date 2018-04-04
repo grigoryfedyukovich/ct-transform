@@ -26,7 +26,7 @@ namespace {
 
     std::vector<BasicBlock*> loop;
 
-    void mkConditionalStore (GlobalVariable *varRet, StoreInst * stIn) {
+    void mkConditionalStore (Value *varRet, StoreInst * stIn) {
 
       // this could be done in two stages: via 1) creating icmp, br, two new blocks and 2) running ct-ite
       // but the current version is an optimized one: using ct_eq + ct_select
@@ -37,10 +37,9 @@ namespace {
 
       Instruction* ldIn = builder.CreateLoad(varRet);
       ldIn->insertBefore(stIn);
-      Function * ct_eq = cast<Function>(M->getOrInsertFunction("constant_time_eq",
-                    Type::getInt32Ty(C), Type::getInt32Ty(C), Type::getInt32Ty(C), NULL));
-      ConstantInt *cc = ConstantInt::get(C, APInt(32, 0));
-      CallInst * grdIn = builder.CreateCall(ct_eq, {ldIn, cc});
+      Function * ct_eq = cast<Function>(M->getOrInsertFunction("constant_time_is_zero",
+                    Type::getInt32Ty(C), Type::getInt32Ty(C), NULL));
+      CallInst * grdIn = builder.CreateCall(ct_eq, {ldIn});
       grdIn->insertAfter(ldIn);
 
       Instruction* ldIn2 = builder.CreateLoad(stIn->getOperand (1));
@@ -55,7 +54,7 @@ namespace {
       stIn->eraseFromParent();
     }
 
-    void rewriteStores (BasicBlock * b, GlobalVariable *varRet){
+    void rewriteStores (BasicBlock * b, Value *varRet){
       for (auto it = b->rbegin (); it != b->rend (); ++it) {
         Instruction* I = dyn_cast<Instruction> (&*it);
         StoreInst* stIn;
@@ -141,24 +140,18 @@ namespace {
 
       if (bris.size() == 0) return;
 
+      IRBuilder<> builder(headBr->getContext());
       ConstantInt *cc = ConstantInt::get(headBr->getContext(), APInt(32, 0));
 
-      GlobalVariable *var = new GlobalVariable(
-              *headBr->getParent()->getParent()->getParent(),
-              Type::getInt32Ty(headBr->getContext()),
-              false, GlobalValue::ExternalLinkage, nullptr, "_tmp_counter");
-      GlobalVariable *varRet = new GlobalVariable(
-              *headBr->getParent()->getParent()->getParent(),
-              Type::getInt32Ty(headBr->getContext()),
-              false, GlobalValue::ExternalLinkage, nullptr, "_tmp_ret");
-      var->setInitializer(cc);
-      varRet->setInitializer(cc);
+      AllocaInst* var = new AllocaInst(Type::getInt32Ty(headBr->getContext()), "_tmp_counter");
+      var->insertBefore(bri);
+      Instruction *strVar = builder.CreateStore(cc, var);
+      strVar->insertAfter(var);
 
-      IRBuilder<> builder(headBr->getContext());
-      Instruction *I2 = builder.CreateStore(cc, (Value*)var);         // here; we assume the original counter starts with 0
-      Instruction *I2ret = builder.CreateStore(cc, (Value*)varRet);   // here; artificial return always starts with zero
-      I2->insertBefore(bri);
-      I2ret->insertBefore(I2);
+      AllocaInst* varRet = new AllocaInst(Type::getInt32Ty(headBr->getContext()), "_tmp_ret");
+      varRet->insertBefore(bri);
+      Instruction *strVarRet = builder.CreateStore(cc, varRet);
+      strVarRet->insertAfter(varRet);
 
       // then, before each store, we check if the original loop has already terminated
       for (unsigned int i = 1; i < loop.size()-1; i++) rewriteStores(loop[i], varRet);
@@ -208,7 +201,7 @@ namespace {
         }
 
         ConstantInt *c1 = ConstantInt::get(headBr->getContext(), APInt(32, 1));
-        Instruction *retSt = builder.CreateStore(c1, (Value*)varRet);         // here; we assume the original counter starts with 0
+        Instruction *retSt = builder.CreateStore(c1, (Value*)varRet);
         retSt->insertBefore(briToRemove);
 
         Instruction* newBr = BranchInst::Create(loop[0]);
