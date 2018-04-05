@@ -65,16 +65,23 @@ namespace {
         
         Constant* c;
         Instruction* in;
-        if (op->getType()->getTypeID() == Type::IntegerTyID && (c = dyn_cast<Constant> (op))){
+        PointerType *PTy;
+        AllocaInst* alloIn;
+        if ((alloIn = dyn_cast<AllocaInst> (op))){
+          int num = getNum(instrs, alloIn);
+          if (num >= 0) errs () << " < Instr #" << num << " > ";
+        } else if (op->getType()->getTypeID() == Type::IntegerTyID && (c = dyn_cast<Constant> (op))){
           errs () << c->getUniqueInteger ();
         }
         else if (op->getType()->getTypeID() == Type::IntegerTyID && (in = dyn_cast<Instruction> (op))){
           int num = getNum(instrs, in);
           if (num >= 0) errs () << " < Instr #" << num << " > ";
         }
-        else if (op->getType()->getTypeID() == Type::PointerTyID /*&& (PTy = dyn_cast<PointerType>(op))*/){
-          //        if (unsigned AddressSpace = PTy->getAddressSpace())
-          //          errs () << " addrspace(" << AddressSpace << ')';
+        else if (op->getType()->getTypeID() == Type::PointerTyID && (PTy = dyn_cast<PointerType>(op->getType()))){
+          if (GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(op)){
+            int num = getNum(instrs, gep);
+            if (num >= 0) errs () << " < Instr #" << num << " > ";
+          }
         }
         else if (op->getType()->getTypeID() == Type::LabelTyID){
           errs () << "PTR: " << add(ptrs, op);

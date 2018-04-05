@@ -23,6 +23,23 @@ namespace {
     static char ID;
     CTite() : FunctionPass(ID) {}
 
+    bool isEquiv (Value* in1, Value* in2){
+      if (in1 == in2) return true;
+      if ((in1->getName() != in2->getName())) return false;
+      Instruction* in1i;
+      Instruction* in2i;
+      if ((in1i = dyn_cast<Instruction> (in1)) && (in2i = dyn_cast<Instruction> (in2))){
+        if (in1i->getNumOperands() != in2i->getNumOperands()) return false;
+
+        for (unsigned i = 0; i < in1i->getNumOperands (); i++)
+          if (!isEquiv(in1i->getOperand (i), in2i->getOperand (i))) return false;
+
+      } else {
+        return false;
+      }
+      return true;
+    }
+
     void getLastStores (BasicBlock * b, std::map<Value *, Value* >& stores){
       for (auto it = b->rbegin (); it != b->rend (); ++it) {
         Instruction* I = dyn_cast<Instruction> (&*it);
@@ -38,12 +55,20 @@ namespace {
     }
 
     void rewriteStores (BasicBlock * b, Value* ptr, Value* vs, Value* vl) {
-      std::vector<Instruction*> toRemove;
 
+      // for arrays (some very basic support):
+      GetElementPtrInst* gep;
+      if ((gep = dyn_cast<GetElementPtrInst>(ptr))){
+        rewriteStoresGEP(b, gep, vs, vl);
+        return;
+      }
+
+      std::vector<Instruction*> toRemove;
       for (auto it = b->begin (); it != b->end (); ++it) {
         Instruction* I = dyn_cast<Instruction> (&*it);
         StoreInst* stIn;
         LoadInst *loIn;
+
         if ((stIn = dyn_cast<StoreInst>(I)) &&
             (stIn->getOperand (1)->getType()->getTypeID() == Type::PointerTyID) &&
             ptr == stIn->getOperand (1))
@@ -64,6 +89,36 @@ namespace {
               *opnd = vs;
             }
           }
+        }
+      }
+      for (auto & a : toRemove) a->eraseFromParent();
+    }
+
+    void rewriteStoresGEP (BasicBlock * b, GetElementPtrInst* ptr, Value* vs, Value* vl) {
+      std::vector<Instruction*> toRemove;
+
+      for (auto it = b->begin (); it != b->end (); ++it) {
+        Instruction* I = dyn_cast<Instruction> (&*it);
+        StoreInst* stIn;
+        LoadInst *loIn;
+        GetElementPtrInst *gep;
+
+        if ((stIn = dyn_cast<StoreInst>(I)) &&
+            (stIn->getOperand (1)->getType()->getTypeID() == Type::PointerTyID) &&
+            (gep = dyn_cast<GetElementPtrInst>(stIn->getOperand (1))) &&
+            isEquiv(gep, ptr))
+        {
+          vs = gep;
+          toRemove.push_back(stIn);
+        }
+        else if ((loIn = dyn_cast<LoadInst>(I)) &&
+                 (loIn->getOperand (0)->getType()->getTypeID() == Type::PointerTyID) &&
+                 (gep = dyn_cast<GetElementPtrInst>(loIn->getOperand (0))) &&
+                 isEquiv(gep, ptr) &&
+                 vs != NULL)
+        {
+          vl = loIn;
+          toRemove.push_back(loIn);
         }
       }
       for (auto & a : toRemove) a->eraseFromParent();
