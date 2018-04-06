@@ -183,6 +183,16 @@ namespace {
       newBr->insertBefore(headBr);
       headBr->eraseFromParent();
 
+      for (unsigned int i = 1; i < loop.size() - 1; i++)
+      {
+        for (User &u : *loop[i]) {
+          GetElementPtrInst* gep;
+          if ((gep = dyn_cast<GetElementPtrInst>(&u))) {
+            replaceValue(gep, torepl, var);
+          }
+        }
+      }
+
       // then, proceed further to the loop
       // previously, we identified the divergence at lastBri = dyn_cast<BranchInst> (&*(loop[i]->rbegin ()))
       // (thus need to keep the edge lastBri->loop[i+1] only)
