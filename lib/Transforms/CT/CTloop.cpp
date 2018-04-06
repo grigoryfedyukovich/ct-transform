@@ -129,10 +129,13 @@ namespace {
 
       BranchInst* lastBri;
       std::vector<BranchInst* > bris;
+      std::vector<BranchInst* > brisSingl;
       for (unsigned int i = 1; i < loop.size() - 1; i++)
       {
         if ((lastBri = dyn_cast<BranchInst> (&*(loop[i]->rbegin ())))){
-          if (lastBri->getNumSuccessors() == 2 &&
+          if (lastBri->getNumSuccessors() == 1 && lastBri->getSuccessor(0) == loop[0]) {
+            brisSingl.push_back(lastBri);
+          } else if (lastBri->getNumSuccessors() == 2 &&
              (isChainToExit(lastBri->getSuccessor(0), exitBB) || isChainToExit(lastBri->getSuccessor(1), exitBB))) {
             bris.push_back(lastBri);
           }
@@ -158,24 +161,19 @@ namespace {
       // then, before each store, we check if the original loop has already terminated
       for (unsigned int i = 1; i < loop.size()-1; i++) rewriteStores(loop[i], varRet);
 
-      // then, we instrument the body with artif. counter:
-      for (int j = 0; j < 2; j++){
-        
-        BasicBlock* b1 = headBr->getSuccessor(j);
-        if (b1 == loop[1]) {
-          // loop iteration
+      // then, we instrument the body with artif. counter placed in a new block
+      BasicBlock* bn = BasicBlock::Create(headBr->getContext(), "", loop[0]->getParent());
+      BranchInst* brn = BranchInst::Create(loop[0], bn);
+      Instruction* varLd = builder.CreateLoad(var);
+      BinaryOperator *varInc = BinaryOperator::
+            CreateAdd(varLd, ConstantInt::get(headBr->getContext(), APInt(32, 1)));
+      Instruction* varStor = builder.CreateStore(varInc, var);
 
-          Instruction* loop1 = builder.CreateLoad(var);
-          BinaryOperator *loop2 = BinaryOperator::
-          CreateAdd(loop1, ConstantInt::get(headBr->getContext(), APInt(32, 1)));
-          Instruction* loop3 = builder.CreateStore(loop2, var);
+      varLd->insertBefore(brn);               // adding an increment
+      varInc->insertAfter(varLd);             // here, we assume the original counter increments by one
+      varStor->insertAfter(varInc);             // and starts with zero
 
-          loop1->insertBefore(&*(b1->begin ()));  // adding an increment
-          loop2->insertAfter(loop1);              // here, we assume the original counter increments by one
-          loop3->insertAfter(loop2);              //
-
-        }
-      }
+      for (auto a : brisSingl) replaceValue(a, loop[0], bn);
 
       // here, we replace the loop guard:
       ICmpInst *old_icmp = dyn_cast<ICmpInst>(headBr->getCondition ());
@@ -201,7 +199,7 @@ namespace {
         Instruction *retSt = builder.CreateStore(c1, (Value*)varRet);
         retSt->insertBefore(briToRemove);
 
-        Instruction* newBr = BranchInst::Create(loop[0]);
+        Instruction* newBr = BranchInst::Create(bn);
         newBr->insertAfter(briToRemove);
         briToRemove->eraseFromParent();
       }

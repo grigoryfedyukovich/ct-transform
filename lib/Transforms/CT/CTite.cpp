@@ -252,15 +252,7 @@ namespace {
         BranchInst* newIns = BranchInst::Create(*chain2.begin());
         newIns->insertBefore(toRepl);
         toRepl->eraseFromParent();
-        toRepl = dyn_cast<BranchInst> (&*((*(++chain2.rbegin ()))->rbegin ()));
       }
-
-      // artificial third block (where the merge takes place)
-      BasicBlock* bn = BasicBlock::Create(toRepl->getContext(), "", toRepl->getParent()->getParent());
-      BranchInst* brn = BranchInst::Create(toRepl->getSuccessor(0), bn);
-      BranchInst* newIns = BranchInst::Create(bn);
-      newIns->insertBefore(toRepl);
-      toRepl->eraseFromParent();
 
       // repair the code after the merge
       std::set <Value *> ptrs;
@@ -268,7 +260,8 @@ namespace {
       for (auto & p : stores2) ptrs.insert(p.first);
       if (ptrs.size() == 0) return;
 
-      IRBuilder<> builder(newIns->getContext());
+      BasicBlock* bn = toRepl->getSuccessor(0);
+      IRBuilder<> builder(toRepl->getContext());
       Function *ite_func = fun_ct_select(bn->getParent()->getParent(), bn->getContext());
 
       for (auto & ptr : ptrs) {
@@ -279,7 +272,7 @@ namespace {
         LoadInst *redund = NULL;
         if (v1 == NULL || v2 == NULL){
           redund = builder.CreateLoad((Value*)ptr);
-          redund->insertBefore(brn);
+          redund->insertBefore(&*((*(chain1.rbegin ()))->begin ()));
           if (v1 == NULL) { v1 = redund; }
           else { v2 = redund; }
         }
