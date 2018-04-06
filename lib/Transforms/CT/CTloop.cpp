@@ -95,16 +95,18 @@ namespace {
       return isReachable(bri->getParent(), std::vector<BasicBlock*> ());
     }
 
-    // assumes at least one argument of Icmp is var, to add more sophisticated analysis
-    ICmpInst* replaceVarInIcmp (ICmpInst* icmp, Instruction* loadTmp){
-      LoadInst *l = nullptr;
-      if ((l = dyn_cast<LoadInst>(icmp->getOperand(0)))) {
-        return new ICmpInst(icmp->getPredicate(), loadTmp, icmp->getOperand(1));
+    bool replaceValue (Value* val, Value* from, Value* to){
+      if (Instruction* instr = dyn_cast<Instruction>(val)) {
+        for (auto opnd = instr->op_begin(); opnd < instr->op_end(); ++opnd) {
+          if (*opnd == from) {
+            *opnd = to;
+            return true;
+          } else {
+            if (replaceValue (*opnd, from, to)) return true;
+          }
+        }
       }
-      else if ((l = dyn_cast<LoadInst>(icmp->getOperand(1)))) {
-        return new ICmpInst(icmp->getPredicate(), icmp->getOperand(0), loadTmp);
-      }
-      else assert(0); // TODO: support
+      return false;
     }
 
     bool isChainToExit(BasicBlock* start, BasicBlock* end) {
@@ -177,16 +179,11 @@ namespace {
 
       // here, we replace the loop guard:
       ICmpInst *old_icmp = dyn_cast<ICmpInst>(headBr->getCondition ());
-      Instruction* loadTmp = builder.CreateLoad(var);
-      loadTmp->insertBefore(headBr);
-      ICmpInst *inIcmp = replaceVarInIcmp(old_icmp, loadTmp); // tested for ICmpInst::ICMP_ULE / ICMP_ULT
-      inIcmp->insertAfter(loadTmp);
-
-      BranchInst* newBr = BranchInst::Create(headBr->getSuccessor(0), headBr->getSuccessor(1), inIcmp);
+      Value* torepl = ((Instruction*)old_icmp->getOperand(0))->getOperand(0); /// currently, assume the counter is the first operand in the loop guard
+      replaceValue(old_icmp, torepl, var);
+      BranchInst* newBr = BranchInst::Create(headBr->getSuccessor(0), headBr->getSuccessor(1), old_icmp);
       newBr->insertBefore(headBr);
       headBr->eraseFromParent();
-      old_icmp->eraseFromParent();
-      loop[0]->begin()->eraseFromParent(); // erase "load s"
 
       // then, proceed further to the loop
       // previously, we identified the divergence at lastBri = dyn_cast<BranchInst> (&*(loop[i]->rbegin ()))
