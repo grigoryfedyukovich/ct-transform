@@ -54,7 +54,8 @@ namespace {
       stIn->eraseFromParent();
     }
 
-    void rewriteStores (BasicBlock * b, Value *varRet){
+    void rewriteStores (BasicBlock * b, Value *varRet, std::set<BasicBlock *>& stopBBs){
+      for (auto & a : stopBBs) if (b == a) return;
       for (auto it = b->rbegin (); it != b->rend (); ++it) {
         Instruction* I = dyn_cast<Instruction> (&*it);
         StoreInst* stIn;
@@ -62,6 +63,32 @@ namespace {
             (stIn->getOperand (1)->getType()->getTypeID() == Type::PointerTyID))
         {
           mkConditionalStore(varRet, stIn);
+        }
+      }
+      // then, proceed recursively:
+      BranchInst* lastBri;
+      if ((lastBri = dyn_cast<BranchInst> (&*(b->rbegin ())))){
+        for (unsigned int i = 0; i < lastBri->getNumSuccessors (); i++){
+          rewriteStores(lastBri->getSuccessor(i), varRet, stopBBs);
+        }
+      }
+    }
+
+    void replaceArrIndexes (BasicBlock * b, Value* torepl, Value* var, std::set<BasicBlock *>& stopBBs){
+      for (auto & a : stopBBs) if (b == a) return;
+
+      for (User &u : *b) {
+        GetElementPtrInst* gep;
+        if ((gep = dyn_cast<GetElementPtrInst>(&u))) {
+          replaceValue(gep, torepl, var);
+        }
+      }
+
+      // then, proceed recursively:
+      BranchInst* lastBri;
+      if ((lastBri = dyn_cast<BranchInst> (&*(b->rbegin ())))){
+        for (unsigned int i = 0; i < lastBri->getNumSuccessors (); i++){
+          replaceArrIndexes(lastBri->getSuccessor(i), torepl, var, stopBBs);
         }
       }
     }
@@ -159,7 +186,10 @@ namespace {
       strVarRet->insertAfter(varRet);
 
       // then, before each store, we check if the original loop has already terminated
-      for (unsigned int i = 1; i < loop.size()-1; i++) rewriteStores(loop[i], varRet);
+      std::set<BasicBlock *> stopBBs;
+      stopBBs.insert(loop[0]);
+      stopBBs.insert(exitBB);
+      rewriteStores(loop[1], varRet, stopBBs);
 
       // then, we instrument the body with artif. counter placed in a new block
       BasicBlock* bn = BasicBlock::Create(headBr->getContext(), "", loop[0]->getParent());
@@ -183,15 +213,7 @@ namespace {
       newBr->insertBefore(headBr);
       headBr->eraseFromParent();
 
-      for (unsigned int i = 1; i < loop.size() - 1; i++)
-      {
-        for (User &u : *loop[i]) {
-          GetElementPtrInst* gep;
-          if ((gep = dyn_cast<GetElementPtrInst>(&u))) {
-            replaceValue(gep, torepl, var);
-          }
-        }
-      }
+      replaceArrIndexes(loop[1], torepl, var, stopBBs);
 
       // then, proceed further to the loop
       // previously, we identified the divergence at lastBri = dyn_cast<BranchInst> (&*(loop[i]->rbegin ()))
