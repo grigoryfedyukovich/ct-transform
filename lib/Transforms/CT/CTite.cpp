@@ -49,7 +49,6 @@ namespace {
         {
           if (stores[stIn->getOperand (1)] == NULL)
             stores[stIn->getOperand (1)] = stIn->getOperand (0);
-          else return;
         }
       }
     }
@@ -145,16 +144,18 @@ namespace {
       }
     }
 
-    void cutAtCommonEl(std::vector<BasicBlock*>& chain1, std::vector<BasicBlock*>& chain2){
+    BasicBlock* cutAtCommonEl(std::vector<BasicBlock*>& chain1, std::vector<BasicBlock*>& chain2){
       for (auto it1 = chain1.begin(); it1 != chain1.end(); ++it1){
         for (auto it2 = chain2.begin(); it2 != chain2.end(); ++it2){
           if (*it1 == *it2){
+            BasicBlock* bb = *it1;
             chain1.erase (it1+1, chain1.end());
             chain2.erase (it2+1, chain2.end());
-            return;
+            return bb;
           }
         }
       }
+      return NULL;
     }
 
     Function * fun_ct_iszero (Module* M, LLVMContext& C){
@@ -230,7 +231,7 @@ namespace {
 
       getBBchain (bri->getSuccessor(0), chain1);
       getBBchain (bri->getSuccessor(1), chain2);
-      cutAtCommonEl(chain1, chain2);
+      BasicBlock* cmn = cutAtCommonEl(chain1, chain2);
 
       std::map<Value *, Value* > stores1;
       std::map<Value *, Value* > stores2;
@@ -252,7 +253,15 @@ namespace {
         BranchInst* newIns = BranchInst::Create(*chain2.begin());
         newIns->insertBefore(toRepl);
         toRepl->eraseFromParent();
+        toRepl = dyn_cast<BranchInst> (&*((*(++chain2.rbegin ()))->rbegin ()));
       }
+
+      // create new artif BB
+      BasicBlock* bnew = BasicBlock::Create(toRepl->getContext(), "", toRepl->getParent()->getParent());
+      BranchInst* brnew = BranchInst::Create(cmn, bnew);
+      BranchInst* newIns = BranchInst::Create(bnew);
+      newIns->insertBefore(toRepl);
+      toRepl->eraseFromParent();
 
       // repair the code after the merge
       std::set <Value *> ptrs;
@@ -272,11 +281,11 @@ namespace {
         LoadInst *redund = NULL;
         if (v1 == NULL || v2 == NULL){
           redund = builder.CreateLoad((Value*)ptr);
-          redund->insertBefore(&*((*(chain1.rbegin ()))->begin ()));
+          redund->insertBefore(brnew);
           if (v1 == NULL) { v1 = redund; }
           else { v2 = redund; }
         }
-        
+
         CallInst *op;
         // little hack: NE is treated in the same way as EQ
         // but with the opposite order of elements
@@ -284,14 +293,11 @@ namespace {
           op = builder.CreateCall(ite_func, { repl, v2, v1});
         else
           op = builder.CreateCall(ite_func, { repl, v1, v2});
-        
-        if (redund == NULL)
-          op->insertBefore(&*(bn->begin ()));
-        else
-          op->insertAfter(redund);
+
+        op->insertBefore(brnew);
         StoreInst * s = builder.CreateStore(op, (Value*)ptr);
         s->insertAfter(op);
-        
+
         Value* vs = NULL;
         Value* vl = NULL;
         for (auto it = chain1.begin (); it != chain1.end ()-1; ++it)
