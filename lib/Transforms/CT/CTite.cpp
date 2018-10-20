@@ -53,16 +53,31 @@ namespace {
       }
     }
 
-    void rewriteStores (BasicBlock * b, Value* ptr, Value* vs, Value* vl) {
+    Value* getLoad (std::vector<BasicBlock*> chain, Value* ptr){
+      for (auto it = chain.begin(); it != chain.end()-1; ++it){
+        auto & b = *it;
+        for (auto it = b->begin (); it != b->end (); ++it) {
+          Instruction* I = dyn_cast<Instruction> (&*it);
+          LoadInst* loIn;
+          if ((loIn = dyn_cast<LoadInst>(I)) &&
+              (loIn->getOperand (0)->getType()->getTypeID() == Type::PointerTyID) &&
+              (loIn->getOperand (0) == ptr))
+          {
+            return loIn;
+          }
+        }
+      }
+      return NULL;
+    }
 
+    void rewriteStores (BasicBlock * b, Value* ptr, Value* &vs, Value* &vl, std::vector<Instruction*>& toRemove) {
       // for arrays (some very basic support):
       GetElementPtrInst* gep;
       if ((gep = dyn_cast<GetElementPtrInst>(ptr))){
-        rewriteStoresGEP(b, gep, vs, vl);
+        rewriteStoresGEP(b, gep, vs, vl, toRemove);
         return;
       }
 
-      std::vector<Instruction*> toRemove;
       for (auto it = b->begin (); it != b->end (); ++it) {
         Instruction* I = dyn_cast<Instruction> (&*it);
         StoreInst* stIn;
@@ -90,11 +105,9 @@ namespace {
           }
         }
       }
-      for (auto & a : toRemove) a->eraseFromParent();
     }
 
-    void rewriteStoresGEP (BasicBlock * b, GetElementPtrInst* ptr, Value* vs, Value* vl) {
-      std::vector<Instruction*> toRemove;
+    void rewriteStoresGEP (BasicBlock * b, GetElementPtrInst* ptr, Value* &vs, Value* &vl, std::vector<Instruction*>& toRemove) {
 
       for (auto it = b->begin (); it != b->end (); ++it) {
         Instruction* I = dyn_cast<Instruction> (&*it);
@@ -120,7 +133,6 @@ namespace {
           toRemove.push_back(loIn);
         }
       }
-      for (auto & a : toRemove) a->eraseFromParent();
     }
 
     BasicBlock* getBBsuccessor (BasicBlock* bb){
@@ -278,8 +290,15 @@ namespace {
         Value* v1 = stores1[ptr];
         Value* v2 = stores2[ptr];
 
-        LoadInst *redund = NULL;
+        // check if there exists a branch in which the variable is not reassigned
+        // first, try to search for existing loads
+        if (v1 == NULL) v1 = getLoad(chain2, ptr);
+        if (v2 == NULL) v2 = getLoad(chain1, ptr);
+
+        // second (if no success above) create a new load
         if (v1 == NULL || v2 == NULL){
+          assert (v1 != NULL || v2 != NULL);
+          LoadInst *redund = NULL;
           redund = builder.CreateLoad((Value*)ptr);
           redund->insertBefore(brnew);
           if (v1 == NULL) { v1 = redund; }
@@ -300,12 +319,14 @@ namespace {
 
         Value* vs = NULL;
         Value* vl = NULL;
+        std::vector<Instruction*> toRemove;
         for (auto it = chain1.begin (); it != chain1.end ()-1; ++it)
-          rewriteStores(*it, ptr, vs, vl);
+          rewriteStores(*it, ptr, vs, vl, toRemove);
         vs = NULL;
         vl = NULL;
         for (auto it = chain2.begin (); it != chain2.end ()-1; ++it)
-          rewriteStores(*it, ptr, vs, vl);
+          rewriteStores(*it, ptr, vs, vl, toRemove);
+        for (auto & a : toRemove) a->eraseFromParent();
       }
       icmp->eraseFromParent();
     }
